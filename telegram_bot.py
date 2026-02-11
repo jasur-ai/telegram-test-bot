@@ -33,7 +33,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Bot Token - use environment variable for security
-BOT_TOKEN = os.getenv('BOT_TOKEN', "8534371752:AAFDjc0nMbBSuFGtGl7s_sIUEn1A6Uz-9c4")
+BOT_TOKEN = os.getenv('BOT_TOKEN', "8534371752:AAFGZkSU_h20PU2E4x93HThRvBXVl1gN-Nw")
 
 # Channel IDs
 MANDATORY_CHANNEL = "@untoldies"  # Mandatory subscription channel
