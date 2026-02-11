@@ -40,7 +40,7 @@ MANDATORY_CHANNEL = "@untoldies"  # Mandatory subscription channel
 ADMIN_CHANNEL = "@IshtixonKimyo"  # Admin notifications channel
 
 # Admin user IDs - can be set via environment variable
-ADMIN_IDS_ENV = os.getenv('ADMIN_IDS', '8004724563')
+ADMIN_IDS_ENV = os.getenv('ADMIN_IDS', '8004724563,506343083')
 ADMIN_IDS = [int(id.strip()) for id in ADMIN_IDS_ENV.split(',')]
 
 # Conversation states
