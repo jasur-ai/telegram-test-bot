@@ -22,6 +22,8 @@ from telegram.error import TelegramError
 import json
 import os
 from datetime import datetime
+import asyncio
+from aiohttp import web
 
 # Enable logging
 logging.basicConfig(
@@ -31,14 +33,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Bot Token - use environment variable for security
-BOT_TOKEN = os.getenv('BOT_TOKEN', "8534371752:AAFGZkSU_h20PU2E4x93HThRvBXVl1gN-Nw")
+BOT_TOKEN = os.getenv('BOT_TOKEN', "8534371752:AAFDjc0nMbBSuFGtGl7s_sIUEn1A6Uz-9c4")
 
 # Channel IDs
 MANDATORY_CHANNEL = "@untoldies"  # Mandatory subscription channel
 ADMIN_CHANNEL = "@IshtixonKimyo"  # Admin notifications channel
 
 # Admin user IDs - can be set via environment variable
-ADMIN_IDS_ENV = os.getenv('ADMIN_IDS', '8004724563,506343083')
+ADMIN_IDS_ENV = os.getenv('ADMIN_IDS', '8004724563')
 ADMIN_IDS = [int(id.strip()) for id in ADMIN_IDS_ENV.split(',')]
 
 # Conversation states
@@ -71,6 +73,26 @@ def save_data(filename, data):
     """Save data to JSON file"""
     with open(filename, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+# Health check endpoint for Render
+async def health_check(request):
+    """Simple health check endpoint"""
+    return web.Response(text='Bot is running!', status=200)
+
+
+async def start_health_server():
+    """Start a simple HTTP server for health checks"""
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    app.router.add_get('/health', health_check)
+    
+    port = int(os.getenv('PORT', 10000))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    logger.info(f"Health check server started on port {port}")
 
 
 # Check channel subscription
@@ -679,6 +701,14 @@ def main():
     
     # Start the bot
     logger.info("Bot started...")
+    
+    # Create event loop and run both bot and health server
+    loop = asyncio.get_event_loop()
+    
+    # Start health check server
+    loop.create_task(start_health_server())
+    
+    # Run the bot
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
