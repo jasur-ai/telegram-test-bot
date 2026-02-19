@@ -22,8 +22,13 @@ from telegram.error import TelegramError
 import json
 import os
 from datetime import datetime
-import asyncio
-from aiohttp import web
+import pandas as pd
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # Use non-GUI backend for server
+import matplotlib.pyplot as plt
+import seaborn as sns
+import io
 
 # Enable logging
 logging.basicConfig(
@@ -40,7 +45,7 @@ MANDATORY_CHANNEL = "@untoldies"  # Mandatory subscription channel
 ADMIN_CHANNEL = "@IshtixonKimyo"  # Admin notifications channel
 
 # Admin user IDs - can be set via environment variable
-ADMIN_IDS_ENV = os.getenv('ADMIN_IDS', '8004724563,506343083')
+ADMIN_IDS_ENV = os.getenv('ADMIN_IDS', '8004724563')
 ADMIN_IDS = [int(id.strip()) for id in ADMIN_IDS_ENV.split(',')]
 
 # Conversation states
@@ -73,26 +78,6 @@ def save_data(filename, data):
     """Save data to JSON file"""
     with open(filename, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
-
-
-# Health check endpoint for Render
-async def health_check(request):
-    """Simple health check endpoint"""
-    return web.Response(text='Bot is running!', status=200)
-
-
-async def start_health_server():
-    """Start a simple HTTP server for health checks"""
-    app = web.Application()
-    app.router.add_get('/', health_check)
-    app.router.add_get('/health', health_check)
-    
-    port = int(os.getenv('PORT', 10000))
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
-    logger.info(f"Health check server started on port {port}")
 
 
 # Check channel subscription
@@ -421,6 +406,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("➕ Test qo'shish", callback_data="admin_add_test")],
         [InlineKeyboardButton("📊 Javoblarni tekshirish", callback_data="admin_check_answers")],
+        [InlineKeyboardButton("📈 Rasch Analysis", callback_data="admin_rasch_analysis")],
         [InlineKeyboardButton("📋 Ro'yxatlar", callback_data="admin_view_registrations")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -654,6 +640,238 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 
+# Rasch Analysis Functions
+def perform_rasch_analysis(test_id: str, registrations: dict, tests: dict) -> tuple:
+    """
+    Perform Rasch analysis on test results
+    Returns: (result_df, items_info_df, graph_buffer)
+    """
+    try:
+        # Prepare data
+        data = []
+        user_ids = []
+        
+        correct_answers = tests[test_id]['answers'].lower().replace(" ", "")
+        correct_letters = [c for c in correct_answers if c.isalpha()]
+        num_questions = len(correct_letters)
+        
+        for user_id, user_data in registrations[test_id].items():
+            if user_data['answers']:
+                user_answers = user_data['answers'].lower().replace(" ", "")
+                user_letters = [c for c in user_answers if c.isalpha()]
+                
+                # Create binary response vector (1=correct, 0=wrong)
+                responses = []
+                for i in range(num_questions):
+                    if i < len(user_letters):
+                        responses.append(1 if user_letters[i] == correct_letters[i] else 0)
+                    else:
+                        responses.append(0)
+                
+                data.append(responses)
+                user_ids.append(f"{user_data['name']} {user_data['surname']}")
+        
+        if not data:
+            return None, None, None
+        
+        # Create DataFrame
+        df = pd.DataFrame(data, index=user_ids, 
+                         columns=[f"S{i+1}" for i in range(num_questions)])
+        
+        # Rasch difficulty calculation
+        p_values = df.mean().clip(lower=0.01, upper=0.99)
+        difficulty_logits = np.log((1 - p_values) / p_values)
+        
+        # Item weights (1.0 to 4.0)
+        min_l, max_l = difficulty_logits.min(), difficulty_logits.max()
+        if max_l == min_l:
+            item_weights = np.ones(len(difficulty_logits)) * 2.5
+        else:
+            item_weights = (difficulty_logits - min_l) / (max_l - min_l) * 3.0 + 1.0
+        
+        # Calculate scores
+        raw_weighted_scores = df.dot(item_weights)
+        max_possible_raw = item_weights.sum()
+        target_max = 90.5
+        p = 0.75
+        final_scores = ((raw_weighted_scores / max_possible_raw) ** p) * target_max
+        rounded_scores = final_scores.round(2)
+        
+        # Certificate levels
+        def get_certificate(score):
+            if score >= 70: return "A+"
+            elif 65 <= score < 70: return "A"
+            elif 60 <= score < 65: return "B+"
+            elif 55 <= score < 60: return "B"
+            elif 50 <= score < 55: return "C+"
+            elif 46 <= score < 50: return "C"
+            else: return "Sertifikat berilmaydi"
+        
+        # Results DataFrame
+        result_df = pd.DataFrame({
+            'Ishtirokchi': user_ids,
+            'Togri_Javoblar': df.sum(axis=1),
+            'Rasch_Ball_90.5': rounded_scores,
+            'Sertifikat': rounded_scores.apply(get_certificate)
+        })
+        
+        # Items info for graph
+        items_info = pd.DataFrame({
+            'Savol': df.columns,
+            'Savol_Bali': item_weights.values.round(2)
+        }).sort_values(by='Savol_Bali', ascending=True)
+        
+        # Create graph
+        plt.figure(figsize=(12, 6))
+        sns.set_style("white")
+        palette = sns.color_palette("Blues_d", len(items_info))
+        
+        ax = sns.barplot(x='Savol', y='Savol_Bali', data=items_info, palette=palette)
+        
+        plt.title(f'Test #{test_id} - Savollar Qiyinlik Darajasi (Rasch Analysis)', 
+                 fontsize=14, fontweight='bold', pad=15)
+        plt.xlabel('Savollar', fontsize=11, fontweight='bold')
+        plt.ylabel('Ball (1.0 - 4.0)', fontsize=11, fontweight='bold')
+        plt.xticks(rotation=45, ha='right')
+        plt.ylim(0, 4.5)
+        
+        # Add values on bars
+        for p in ax.patches:
+            ax.annotate(format(p.get_height(), '.2f'),
+                       (p.get_x() + p.get_width() / 2., p.get_height()),
+                       ha='center', va='center',
+                       xytext=(0, 8),
+                       textcoords='offset points',
+                       fontsize=9, fontweight='bold', color='black')
+        
+        sns.despine()
+        plt.tight_layout()
+        
+        # Save to buffer
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+        buf.seek(0)
+        plt.close()
+        
+        return result_df, items_info, buf
+        
+    except Exception as e:
+        logger.error(f"Rasch analysis error: {e}")
+        return None, None, None
+
+
+async def admin_rasch_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show available tests for Rasch analysis"""
+    query = update.callback_query
+    await query.answer()
+    
+    tests = load_data(TESTS_FILE)
+    registrations = load_data(REGISTRATIONS_FILE)
+    
+    keyboard = []
+    for test_id in tests.keys():
+        if test_id in registrations and registrations[test_id]:
+            # Count how many submitted answers
+            submitted = sum(1 for u in registrations[test_id].values() if u.get('answers'))
+            if submitted > 0:
+                keyboard.append([InlineKeyboardButton(
+                    f"Test #{test_id} ({submitted} ta ishtirokchi)", 
+                    callback_data=f"rasch_{test_id}"
+                )])
+    
+    if not keyboard:
+        await query.edit_message_text("❌ Rasch analysis uchun javoblar yo'q.")
+        return
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text(
+        "📈 Rasch Analysis\n\nQaysi testni tahlil qilmoqchisiz?",
+        reply_markup=reply_markup
+    )
+
+
+async def admin_rasch_specific_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Perform Rasch analysis on specific test"""
+    query = update.callback_query
+    await query.answer("📊 Rasch analysis bajarilmoqda...")
+    
+    test_id = query.data.replace("rasch_", "")
+    
+    tests = load_data(TESTS_FILE)
+    registrations = load_data(REGISTRATIONS_FILE)
+    
+    if test_id not in tests or test_id not in registrations:
+        await query.edit_message_text("❌ Test topilmadi.")
+        return
+    
+    # Perform analysis
+    result_df, items_info, graph_buf = perform_rasch_analysis(test_id, registrations, tests)
+    
+    if result_df is None:
+        await query.edit_message_text("❌ Rasch analysis amalga oshirilmadi. Javoblar yo'q.")
+        return
+    
+    # Send graph
+    await query.message.reply_photo(
+        photo=graph_buf,
+        caption=f"📈 Test #{test_id} - Savollar qiyinlik darajasi (Rasch Analysis)"
+    )
+    
+    # Send results as formatted message
+    result_text = f"📊 Test #{test_id} - Rasch Analysis Natijalari\n\n"
+    result_text += f"👥 Ishtirokchilar: {len(result_df)} ta\n\n"
+    result_text += "🏆 Natijalar:\n\n"
+    
+    # Sort by score
+    result_df_sorted = result_df.sort_values('Rasch_Ball_90.5', ascending=False)
+    
+    for idx, row in result_df_sorted.iterrows():
+        result_text += f"{row['Ishtirokchi']}\n"
+        result_text += f"  ✓ To'g'ri: {row['Togri_Javoblar']} | "
+        result_text += f"Ball: {row['Rasch_Ball_90.5']:.2f} | "
+        result_text += f"{row['Sertifikat']}\n\n"
+    
+    # Send results to chat
+    await query.message.reply_text(result_text)
+    
+    # Send individual results to participants
+    for user_id, user_data in registrations[test_id].items():
+        if user_data.get('answers'):
+            try:
+                # Find user's result
+                user_name = f"{user_data['name']} {user_data['surname']}"
+                user_result = result_df[result_df['Ishtirokchi'] == user_name].iloc[0]
+                
+                personal_message = (
+                    f"📊 Test #{test_id} - Rasch Analysis Natijasi\n\n"
+                    f"👤 {user_name}\n"
+                    f"✅ To'g'ri javoblar: {int(user_result['Togri_Javoblar'])}\n"
+                    f"🎯 Rasch Ball: {user_result['Rasch_Ball_90.5']:.2f} / 90.5\n"
+                    f"🏆 Sertifikat: {user_result['Sertifikat']}\n\n"
+                    f"📈 Rasch Analysis - professional baholash usuli orqali "
+                    f"savollar qiyin ligi hisobga olingan holda ball hisobla ndi."
+                )
+                
+                await context.bot.send_message(chat_id=int(user_id), text=personal_message)
+                
+                # Send graph to user as well
+                graph_buf.seek(0)
+                await context.bot.send_photo(
+                    chat_id=int(user_id),
+                    photo=graph_buf,
+                    caption="📈 Test savollarining qiyinlik darajasi"
+                )
+                
+            except Exception as e:
+                logger.error(f"Error sending Rasch result to user {user_id}: {e}")
+    
+    await query.edit_message_text(
+        f"✅ Rasch Analysis yakunlandi!\n\n"
+        f"📊 {len(result_df)} ta ishtirokchiga shaxsiy natijalar yuborildi.\n"
+        f"📈 Grafik va batafsil natijalar yuqorida ko'rsatilgan."
+    )
+
+
 # Main function
 def main():
     """Start the bot"""
@@ -696,19 +914,13 @@ def main():
     application.add_handler(CallbackQueryHandler(check_subscription_callback, pattern='^check_subscription$'))
     application.add_handler(CallbackQueryHandler(admin_check_answers, pattern='^admin_check_answers$'))
     application.add_handler(CallbackQueryHandler(admin_check_specific_test, pattern='^check_'))
+    application.add_handler(CallbackQueryHandler(admin_rasch_analysis, pattern='^admin_rasch_analysis$'))
+    application.add_handler(CallbackQueryHandler(admin_rasch_specific_test, pattern='^rasch_'))
     application.add_handler(CallbackQueryHandler(admin_view_registrations, pattern='^admin_view_registrations$'))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     # Start the bot
     logger.info("Bot started...")
-    
-    # Create event loop and run both bot and health server
-    loop = asyncio.get_event_loop()
-    
-    # Start health check server
-    loop.create_task(start_health_server())
-    
-    # Run the bot
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
